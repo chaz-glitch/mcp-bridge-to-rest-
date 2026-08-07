@@ -63,8 +63,33 @@ SETUP
 """
 
 import os
+import sys
 import requests
-from mcp.server.fastmcp import FastMCP
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError as original_error:
+    # The same import kept failing after a requirements.txt guess that didn't
+    # pan out. Rather than guess a third time, report exactly what IS
+    # actually installed - the real fix is whatever this prints, not another
+    # guess at what it might be.
+    print("=" * 70, file=sys.stderr)
+    print("DIAGNOSTIC: 'from mcp.server.fastmcp import FastMCP' failed.", file=sys.stderr)
+    print(f"Original error: {original_error}", file=sys.stderr)
+    try:
+        import mcp
+        print(f"mcp package IS installed, version: {getattr(mcp, '__version__', 'unknown')}", file=sys.stderr)
+        print(f"mcp package location on disk: {mcp.__file__}", file=sys.stderr)
+        print(f"Top-level names inside mcp: {sorted(dir(mcp))}", file=sys.stderr)
+        try:
+            import mcp.server as mcp_server
+            print(f"mcp.server IS importable. Names inside it: {sorted(dir(mcp_server))}", file=sys.stderr)
+        except Exception as inner_e:
+            print(f"mcp.server itself failed to import: {inner_e}", file=sys.stderr)
+    except ModuleNotFoundError:
+        print("mcp package is NOT installed at all - pip install did not bring it in.", file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+    raise
 
 DISTRU_BASE_URL = "https://app.distru.com"
 DISTRU_API_TOKEN = os.environ.get("DISTRU_API_TOKEN")
@@ -75,7 +100,16 @@ if not DISTRU_API_TOKEN:
         "Set it before starting this server - see the SETUP note at the top of this file."
     )
 
-mcp = FastMCP("distru")
+mcp = FastMCP(
+    "distru",
+    # 0.0.0.0 means "accept connections from anywhere," not just from inside
+    # this same container - without this, Railway's public domain would have
+    # nothing to actually reach, regardless of which port is right.
+    host="0.0.0.0",
+    # Respect whatever port Railway (or any host) assigns via PORT; fall back
+    # to 8000 only for running this locally on your own machine.
+    port=int(os.environ.get("PORT", 8000)),
+)
 
 
 def _distru_get(path: str, params: dict | None = None) -> dict:
