@@ -340,37 +340,17 @@ def list_contacts(max_pages: int = 10) -> list:
 
 
 if __name__ == "__main__":
-    # Streamable HTTP transport - the kind claude.ai's web/mobile Custom Connector expects.
-    # Previously this called mcp.run(transport="streamable-http") directly. Adding
-    # authentication requires wrapping the underlying ASGI app with middleware BEFORE it
-    # starts serving requests, which means getting that raw app object out of the FastMCP
-    # instance and running it via uvicorn directly, rather than letting mcp.run() start
-    # everything internally with no chance to insert a middleware layer first.
-    #
-    # "streamable_http_app()" below is a best-effort guess at FastMCP's method name for
-    # this, based on general knowledge of the library - NOT confirmed against this specific
-    # installed version (1.29.0, confirmed via the r22-era deploy log), since there's no way
-    # to test that from this sandboxed environment. If this guess is wrong, the except
-    # branch below prints exactly what methods this FastMCP instance actually has, the same
-    # diagnostic approach that resolved the import-path issue earlier - so a wrong guess
-    # here produces a fast, precise fix on the next attempt rather than another blind guess.
-    print(f"DIAGNOSTIC: about to extract FastMCP's underlying ASGI app for middleware wrapping", flush=True)
+    # DIAGNOSTIC ROLLBACK (2026-08-07): temporarily reverted to calling mcp.run() directly,
+    # bypassing BridgeAuthMiddleware entirely, to isolate whether the middleware itself is
+    # what's breaking the "add connector" flow - this exact server, same URL, worked
+    # correctly for hours before the middleware was added, which is the strongest evidence
+    # available right now. The middleware code above is untouched and ready to re-enable
+    # once this is confirmed one way or the other - this is a controlled test, not
+    # abandoning the security fix.
+    print(f"DIAGNOSTIC: [rollback mode] calling mcp.run() directly, middleware bypassed, "
+          f"host 0.0.0.0 port {_resolved_port}", flush=True)
     try:
-        try:
-            asgi_app = mcp.streamable_http_app()
-        except AttributeError as attr_error:
-            print("=" * 70, file=sys.stderr)
-            print(f"DIAGNOSTIC: mcp.streamable_http_app() doesn't exist on this FastMCP instance.", file=sys.stderr)
-            print(f"Original error: {attr_error}", file=sys.stderr)
-            print(f"All available attributes/methods on this FastMCP instance: {sorted(dir(mcp))}", file=sys.stderr)
-            print("Look for something like 'app', 'sse_app', 'http_app', or similar in the list above -", file=sys.stderr)
-            print("that's very likely the real method/property name to use instead.", file=sys.stderr)
-            print("=" * 70, file=sys.stderr)
-            raise
-        print(f"DIAGNOSTIC: got the ASGI app successfully, wrapping with BridgeAuthMiddleware", flush=True)
-        authenticated_app = BridgeAuthMiddleware(asgi_app)
-        print(f"DIAGNOSTIC: starting uvicorn directly on host 0.0.0.0 port {_resolved_port}", flush=True)
-        uvicorn.run(authenticated_app, host="0.0.0.0", port=_resolved_port)
+        mcp.run(transport="streamable-http")
     except Exception as startup_error:
-        print(f"DIAGNOSTIC: startup raised an exception: {startup_error!r}", flush=True)
+        print(f"DIAGNOSTIC: mcp.run() raised an exception: {startup_error!r}", flush=True)
         raise
