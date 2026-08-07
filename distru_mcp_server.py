@@ -131,12 +131,17 @@ class BridgeAuthMiddleware(BaseHTTPMiddleware):
     URL itself (for any situation where sending a custom header isn't straightforward - a
     query-string secret is a well-established, if slightly weaker, fallback for exactly
     this kind of lightweight service). Either one matching is sufficient.
-    A generic 401 with no further detail on failure, deliberately - it doesn't confirm or
-    deny whether a wrong secret was "close," which would help someone guessing."""
+    Returns a plain 404, not 401 - this was originally 401, and that specifically appears
+    to make OAuth-aware MCP clients (Claude's connector included) assume the endpoint wants
+    an OAuth handshake and try to negotiate one, producing a confusing "couldn't register
+    with sign-in service" error that has nothing to do with the actual secret check. A 404
+    carries no such connotation - it just looks like nothing is there, which is also,
+    incidentally, a strictly better security posture (doesn't even confirm an authenticated
+    endpoint exists at that URL) than a 401/403 would."""
     async def dispatch(self, request, call_next):
         provided = request.headers.get("x-bridge-secret") or request.query_params.get("key")
         if provided != BRIDGE_SECRET:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return JSONResponse({"error": "not found"}, status_code=404)
         return await call_next(request)
 
 
