@@ -91,6 +91,13 @@ except ModuleNotFoundError as original_error:
     print("=" * 70, file=sys.stderr)
     raise
 
+# Starlette ships as a dependency of mcp[cli] (confirmed via a real deploy log - starlette
+# appeared in the installed-packages list), so this import should be reliable without
+# adding a new line to requirements.txt.
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+import uvicorn
+
 DISTRU_BASE_URL = "https://app.distru.com"
 DISTRU_API_TOKEN = os.environ.get("DISTRU_API_TOKEN")
 
@@ -99,6 +106,39 @@ if not DISTRU_API_TOKEN:
         "DISTRU_API_TOKEN environment variable is not set. "
         "Set it before starting this server - see the SETUP note at the top of this file."
     )
+
+# Bridge-level authentication (added 2026-08-07). Everything above protects the Distru
+# token; this protects the bridge itself. Before this, ANYONE who found this server's
+# public URL could call it and pull real Distru data through it, without ever needing the
+# Distru token themselves - the server trusted every request unconditionally. This checks
+# every incoming request for a shared secret (via the X-Bridge-Secret header, or a ?key=
+# query parameter on the URL for cases where sending a custom header isn't practical) before
+# letting it anywhere near Distru. This secret is intentionally separate from
+# DISTRU_API_TOKEN - rotating one never requires touching the other.
+BRIDGE_SECRET = os.environ.get("BRIDGE_SECRET")
+if not BRIDGE_SECRET:
+    raise RuntimeError(
+        "BRIDGE_SECRET environment variable is not set. This server refuses to start "
+        "without it - running an unauthenticated bridge to real business data is exactly "
+        "the gap this update exists to close. Set a strong random value for it (the same "
+        "way DISTRU_API_TOKEN is set) before starting this server."
+    )
+
+class BridgeAuthMiddleware(BaseHTTPMiddleware):
+    """Rejects any request that doesn't carry the correct shared secret, before it gets
+    anywhere near Distru. Checked in two places for practicality: the X-Bridge-Secret
+    header (the more standard way to send a credential), or a ?key= query parameter on the
+    URL itself (for any situation where sending a custom header isn't straightforward - a
+    query-string secret is a well-established, if slightly weaker, fallback for exactly
+    this kind of lightweight service). Either one matching is sufficient.
+    A generic 401 with no further detail on failure, deliberately - it doesn't confirm or
+    deny whether a wrong secret was "close," which would help someone guessing."""
+    async def dispatch(self, request, call_next):
+        provided = request.headers.get("x-bridge-secret") or request.query_params.get("key")
+        if provided != BRIDGE_SECRET:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
 
 _resolved_port = int(os.environ.get("PORT", 8000))
 print(f"DIAGNOSTIC: os.environ PORT = {os.environ.get('PORT')!r}", flush=True)
@@ -295,14 +335,37 @@ def list_contacts(max_pages: int = 10) -> list:
 
 
 if __name__ == "__main__":
-    # Streamable HTTP transport - the kind claude.ai's web/mobile Custom
-    # Connector expects (as opposed to stdio, which only Claude Desktop can
-    # use running locally). Whatever hosting platform this runs on needs to
-    # expose this process's port publicly over HTTPS.
-    print(f"DIAGNOSTIC: about to call mcp.run(transport='streamable-http') "
-          f"on host 0.0.0.0 port {_resolved_port}", flush=True)
+    # Streamable HTTP transport - the kind claude.ai's web/mobile Custom Connector expects.
+    # Previously this called mcp.run(transport="streamable-http") directly. Adding
+    # authentication requires wrapping the underlying ASGI app with middleware BEFORE it
+    # starts serving requests, which means getting that raw app object out of the FastMCP
+    # instance and running it via uvicorn directly, rather than letting mcp.run() start
+    # everything internally with no chance to insert a middleware layer first.
+    #
+    # "streamable_http_app()" below is a best-effort guess at FastMCP's method name for
+    # this, based on general knowledge of the library - NOT confirmed against this specific
+    # installed version (1.29.0, confirmed via the r22-era deploy log), since there's no way
+    # to test that from this sandboxed environment. If this guess is wrong, the except
+    # branch below prints exactly what methods this FastMCP instance actually has, the same
+    # diagnostic approach that resolved the import-path issue earlier - so a wrong guess
+    # here produces a fast, precise fix on the next attempt rather than another blind guess.
+    print(f"DIAGNOSTIC: about to extract FastMCP's underlying ASGI app for middleware wrapping", flush=True)
     try:
-        mcp.run(transport="streamable-http")
+        try:
+            asgi_app = mcp.streamable_http_app()
+        except AttributeError as attr_error:
+            print("=" * 70, file=sys.stderr)
+            print(f"DIAGNOSTIC: mcp.streamable_http_app() doesn't exist on this FastMCP instance.", file=sys.stderr)
+            print(f"Original error: {attr_error}", file=sys.stderr)
+            print(f"All available attributes/methods on this FastMCP instance: {sorted(dir(mcp))}", file=sys.stderr)
+            print("Look for something like 'app', 'sse_app', 'http_app', or similar in the list above -", file=sys.stderr)
+            print("that's very likely the real method/property name to use instead.", file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            raise
+        print(f"DIAGNOSTIC: got the ASGI app successfully, wrapping with BridgeAuthMiddleware", flush=True)
+        authenticated_app = BridgeAuthMiddleware(asgi_app)
+        print(f"DIAGNOSTIC: starting uvicorn directly on host 0.0.0.0 port {_resolved_port}", flush=True)
+        uvicorn.run(authenticated_app, host="0.0.0.0", port=_resolved_port)
     except Exception as startup_error:
-        print(f"DIAGNOSTIC: mcp.run() raised an exception: {startup_error!r}", flush=True)
+        print(f"DIAGNOSTIC: startup raised an exception: {startup_error!r}", flush=True)
         raise
