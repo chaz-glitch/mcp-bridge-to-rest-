@@ -100,6 +100,11 @@ if not DISTRU_API_TOKEN:
         "Set it before starting this server - see the SETUP note at the top of this file."
     )
 
+_resolved_port = int(os.environ.get("PORT", 8000))
+print(f"DIAGNOSTIC: os.environ PORT = {os.environ.get('PORT')!r}", flush=True)
+print(f"DIAGNOSTIC: resolved port that FastMCP will use = {_resolved_port}", flush=True)
+print(f"DIAGNOSTIC: FastMCP version = {getattr(__import__('mcp'), '__version__', 'unknown')}", flush=True)
+
 mcp = FastMCP(
     "distru",
     # 0.0.0.0 means "accept connections from anywhere," not just from inside
@@ -108,7 +113,7 @@ mcp = FastMCP(
     host="0.0.0.0",
     # Respect whatever port Railway (or any host) assigns via PORT; fall back
     # to 8000 only for running this locally on your own machine.
-    port=int(os.environ.get("PORT", 8000)),
+    port=_resolved_port,
 )
 
 
@@ -294,4 +299,10 @@ if __name__ == "__main__":
     # Connector expects (as opposed to stdio, which only Claude Desktop can
     # use running locally). Whatever hosting platform this runs on needs to
     # expose this process's port publicly over HTTPS.
-    mcp.run(transport="streamable-http")
+    print(f"DIAGNOSTIC: about to call mcp.run(transport='streamable-http') "
+          f"on host 0.0.0.0 port {_resolved_port}", flush=True)
+    try:
+        mcp.run(transport="streamable-http")
+    except Exception as startup_error:
+        print(f"DIAGNOSTIC: mcp.run() raised an exception: {startup_error!r}", flush=True)
+        raise
